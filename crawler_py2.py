@@ -266,7 +266,7 @@ class Crawler(object):
         找到某个元素范围内的可能的点击元素
         '''
         possible_click_elements = []
-        a_tags = element.find_elements_by_css_selector('a[href]')
+        a_tags = element.find_elements_by_css_selector('a')
         buttons = element.find_elements_by_css_selector('button')
         input_tags = element.find_elements_by_css_selector(
             'input[type="submit"]')
