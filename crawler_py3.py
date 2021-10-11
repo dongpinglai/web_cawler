@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, urljoin
 import hashlib
 import json
+import threading
 import pymysql, pymysql.cursors
 
 
@@ -42,8 +43,8 @@ class ChromeBrowser(object):
         options.add_argument('--ignore-urlfetcher-cert-requests')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-gpu')
-        # 禁止下载
-        profile = {"download.default_directory": "NUL", "download.prompt_for_download": False}
+        # 文件下载放到临时目录
+        profile = {"download.default_directory": "/tmp", "download.prompt_for_download": False}
         options.add_experimental_option("prefs", profile)
         # implicitly_wait_seconds = 10
         self.driver = webdriver.Chrome(driver_path, options=options)
@@ -59,6 +60,10 @@ class ChromeBrowser(object):
     def get_http_logs(self):
         logs = self.driver.requests
         return logs
+
+    def add_request_interceptor(self, request_interceptor):
+        self.driver.request_interceptor = request_interceptor
+
 
 class MySelect(object):
     def __init__(self, select_webele):
@@ -114,6 +119,9 @@ class Radio(object):
     def send_keys(self, value):
         self._webelement.click()
     
+    def clear(self):
+        self._webelement.click()
+
 
 class CheckBox(object):
     def __init__(self, webelement):
@@ -250,10 +258,12 @@ class Form(object):
 
     def fill_checkbox_value(self, webelements):
         for webelement in webelements:
+            current_index = webelement._current_index + 1
             webelement.send_keys(current_index)
 
     def fill_radio_value(self, webelements):
         for webelement in webelements:
+            current_index = webelement._current_index + 1
             webelement.send_keys(current_index)
         
     def fill(self):
@@ -340,12 +350,11 @@ def sequence2str(seq, has_quota=False):
 class DbManage(object):
     def __init__(self, config_type=None):
         self.config = self.get_db_config(config_type)
-        self.config = self.get_db_config(config_type)
-        self.user = self.config['db_user']
-        self.password = self.config['db_password']
-        self.host = self.config['db_host']
-        self.port = int(self.config['db_port']) if self.config['db_port'] else 3306
-        self.name = self.config['db_name']
+        self.db_user = self.config['db_user']
+        self.db_password = self.config['db_password']
+        self.db_host = self.config['db_host']
+        self.db_port = int(self.config['db_port']) if self.config['db_port'] else 3306
+        self.db_name = self.config['db_name']
         self._connection = None
         self.place_hold = '%s'
 
@@ -365,11 +374,11 @@ class DbManage(object):
     def connect(self):
         if self._connection is None:
             self._connection = pymysql.connect(
-                host='172.16.110.189', 
-                port=33066, 
-                user='root',
-                password='Qxh28Ct5LJTcuFL7', 
-                db='security',
+                host=self.db_host,
+                port=self.db_port, 
+                user=self.db_user,
+                password=self.db_password,
+                db=self.db_name,
                 cursorclass=pymysql.cursors.DictCursor)
         return self._connection
 
@@ -446,7 +455,7 @@ class Crawler(object):
     '''
     动态、静态结合查找url
     '''
-    def __init__(self, task_id, domain_id, crawl_thread_num=5, handle_thread_num=5,
+    def __init__(self, task_id, domain_id, crawl_thread_num=5,
                  max_running_time=60 * 30):
         self.task_id = task_id
         self.domain_id = domain_id
@@ -457,13 +466,16 @@ class Crawler(object):
         self.pending_urls = set()
         self.complete_urls = set()
         self.pending_complete_urls = set()
+        self.next_urls = set()
+        self._pending_complete_urls_lock = threading.Lock()
+        self._next_urls_lock = threading.Lock()
         self.crawling_url_queue = Queue()
         self.log_entry_queue = Queue()
         self.crawl_thread_num = self.task['thread'] if self.task['thread'] > crawl_thread_num else crawl_thread_num
-        self.handle_thread_num = self.task['thread'] if self.task['thread'] > handle_thread_num else handle_thread_num
         self.max_url_count = self.task['max_url_count']
         self.max_running_time = max_running_time
         self.allow_domains = set()
+        self._saved_url_lock = threading.Lock()
         self.saved_url_hashes = set()
 
     def _start_urls(self):
@@ -496,15 +508,33 @@ class Crawler(object):
     def ignore_suffix(self):
         """The url with ignore_suffix will not be spider."""
         return [
-            'png', 'jpg', 'gif', 'jpeg', 'pdf', 'ico', 'doc', 'docx', 'xsl',
-            'ppt', 'txt', 'zip', 'rar', 'tar', 'tgz', 'bz', 'gz', 'chm',
-            'dll', 'exe', 'mp3', 'rm', 'asf', 'mov', 'ttf', 'rmvb', 'rtf',
-            'ra', 'mp4', 'wma', 'wmv', 'xps', 'mht', 'msi', 'flv', 'xls',
-            'ld2', 'ocx', 'url', 'avi', 'swf', 'db', 'bmp', 'psd', 'iso',
-            'ape', 'cue', 'u32', 'ucd', 'pk', 'lrc', 'm4v', 'nrg', 'cd', 'bmp',
-            'cnn', 'm3u', 'tif', 'mpeg', 'srt', 'chs', 'cab', 'pps',  'mpg',
-            'wps','js', 'css', 'ashx'
+            '.png', '.jpg', '.gif', '.jpeg', '.pdf', '.ico', '.doc', '.docx', '.xsl',
+            '.ppt', '.txt', '.zip', '.rar', '.tar', '.tgz', '.bz', '.gz', '.chm',
+            '.dll', '.exe', '.mp3', '.rm', '.asf', '.mov', '.ttf', '.rmvb', '.rtf',
+            '.ra', '.mp4', '.wma', '.wmv', '.xps', '.mht', '.msi', '.flv', '.xls',
+            '.ld2', '.ocx', '.url', '.avi', '.swf', '.db', '.bmp', '.psd', '.iso',
+            '.ape', '.cue', '.u32', '.ucd', '.pk', '.lrc', '.m4v', '.nrg', '.cd', '.bmp',
+            '.cnn', '.m3u', '.tif', '.mpeg', '.srt', '.chs', '.cab', '.pps',  '.mpg',
+            '.wps', '.js', '.css', '.ashx', '.svg'
         ]
+
+    @property
+    def block_suffix(self):
+        return (
+            '.png', '.jpg', '.gif', '.jpeg', '.pdf', '.ico', '.doc', '.docx', '.xsl',
+            '.ppt', '.txt', '.zip', '.rar', '.tar', '.tgz', '.bz', '.gz', '.chm',
+            '.dll', '.exe', '.mp3', '.rm', '.asf', '.mov', '.ttf', '.rmvb', '.rtf',
+            '.ra', '.mp4', '.wma', '.wmv', '.xps', '.mht', '.msi', '.flv', '.xls',
+            '.ld2', '.ocx', '.url', '.avi', '.swf', '.db', '.bmp', '.psd', '.iso',
+            '.ape', '.cue', '.u32', '.ucd', '.pk', '.lrc', '.m4v', '.nrg', '.cd', '.bmp',
+            '.cnn', '.m3u', '.tif', '.mpeg', '.srt', '.chs', '.cab', '.pps',  '.mpg',
+            '.wps', '.ashx', '.svg' 
+        )
+
+    def interceptor(self, request):
+        block_suffix = self.block_suffix
+        if request.path.endswith(block_suffix):
+            request.abort()
 
     def parse_url(self, url):
         parse_result = urlparse(url)
@@ -524,15 +554,15 @@ class Crawler(object):
                 browser.add_cookie(cookie_dict)
     
     def start(self, allowed_subdomain=False, debug=False):
+        if not self.task['spider_enable']:
+            return
         start_urls = self.start_urls
         if debug:
             self.crawl_thread_num = 1
-            self.handle_thread_num = 1
         for s_url in start_urls:
             self.add_allow_domain(s_url, allowed_subdomain)
             self.crawling_url_queue.put(s_url)
         self.crawl_pool = ThreadPoolExecutor(self.crawl_thread_num)
-        self.hande_next_urls_pool = ThreadPoolExecutor(self.handle_thread_num)
         start_time = time.time()
         print('start_time: ', time.ctime(start_time))
         futures = []
@@ -543,27 +573,31 @@ class Crawler(object):
             if url_count >= self.max_url_count:
                 break
             try:
-                url = self.crawling_url_queue.get(timeout=5)
+                url = self.crawling_url_queue.get(timeout=2)
             except Empty:
                 # TODO：制定一个sleep检查机制，满足某个条件后，提前结束爬虫
                 time.sleep(.5)
                 continue
             # 确保已经爬取和正在爬取的url，不会重复提交给爬取线程
-            pending_complete_urls = self.pending_complete_urls
-            if url in pending_complete_urls:
-                continue
-            self.pending_urls.add(url)
-            future = self.crawl_pool.submit(self.crawl, url)
-            futures.append(future)
-            url_count += 1
+            with self._pending_complete_urls_lock:
+                pending_complete_urls = self.pending_complete_urls
+                if url in pending_complete_urls:
+                    continue
+                self.pending_urls.add(url)
+                # print('submit url: ', url)
+                self.crawl_pool.submit(self.crawl, url)
+                # future = self.crawl_pool.submit(self.crawl, url)
+                # futures.append(future)
+                url_count += 1
 
-        for fs in as_completed(futures):
-            print('future result', fs.result())
-        print("to be shutdown...")
+        # for fs in as_completed(futures):
+        #     print('future result', fs.result())
+        print("to be shutdown...", time.ctime())
         self.crawl_pool.shutdown()
-        self.hande_next_urls_pool.shutdown()
         # 主线程结束前的收尾工作
         # 关闭数据库连接
+        self.db.close()
+        print('crawler finished at ', time.ctime())
 
 
     def crawl(self, url):
@@ -571,6 +605,7 @@ class Crawler(object):
             browser = ChromeBrowser()
             # 设置抓取的日志的url范围
             self.add_driver_scopes(browser)
+            browser.add_request_interceptor(self.interceptor)
             print('crawl', url)
             # 由于设置cookie前必须访问一下页面
             # 故需要设置完cookie后再访问页面
@@ -584,22 +619,24 @@ class Crawler(object):
             wait = WebDriverWait(browser.driver, 5, 0.5)
             wait.until(EC.title_is)
             static_urls = self.get_static_urls(browser, url)
-            print('get static urls...', len(static_urls))
-            self.hande_next_urls_pool.submit(self.handle_next_urls, static_urls, 'static')
+            self.handle_next_urls(static_urls, 'static')
             dynamic_urls = self.get_dynamic_urls(browser)
-            print('get dynamic urls...', len(dynamic_urls))
-            self.hande_next_urls_pool.submit(self.handle_next_urls, dynamic_urls, 'dynamic')
+            self.handle_next_urls(dynamic_urls, 'dynamic')
             # 当前url已经爬取完成,
             # 是否需要加锁？？
-            self.complete_urls.add(url)
-            self.pending_urls.discard(url)
-            self.pending_complete_urls = self.pending_urls.union(
-                self.complete_urls)
+            with self._pending_complete_urls_lock:
+                self.complete_urls.add(url)
+                self.pending_urls.discard(url)
+                self.pending_complete_urls = self.pending_urls.union(
+                    self.complete_urls)
         except Exception as e:
-            print('crawl error', e)
+            print('crawl error: ', url, e)
+            raise e
         finally:
             browser.delete_all_cookies()
             browser.quit()
+            print('crawl url finished', url)
+            self.crawling_url_queue.task_done()
 
     # @try_times(3)
     def get_static_urls(self, browser, referer):
@@ -629,6 +666,8 @@ class Crawler(object):
         static_url_datas = []
         for s_url in static_urls:
             params = self.trans_get_url_params(s_url) 
+            if 'logout' in s_url:
+                continue
             if params:
                 s_url =  self.remove_query_from_url(s_url)
             url_data = {'referer': referer, 'url': s_url, 'method': 'GET', 'domain_id': self.domain_id, 'params': params}  
@@ -680,10 +719,13 @@ class Crawler(object):
             'input[type="submit"]')
         elements_with_on_click = element.find_elements_by_css_selector(
             '[onclick]')
+        input_buttons = element.find_elements_by_css_selector(
+            'input[type="button"]')
         possible_click_elements.extend(a_tags)
         possible_click_elements.extend(buttons)
         possible_click_elements.extend(input_tags)
         possible_click_elements.extend(elements_with_on_click)
+        possible_click_elements.extend(input_buttons)
         # 过滤点退出点击操作的元素
         possible_click_elements = self.filter_logout_element(possible_click_elements)
         return possible_click_elements
@@ -715,36 +757,41 @@ class Crawler(object):
         my_form = Form(form)
         iterate_count = my_form._iterate_count
         current_win_handle = browser.current_window_handle
+        current_url = browser.current_url
         current_handles = browser.window_handles
         for _ in range(iterate_count):
             for f_click_ele in form_click_elements:
                 my_form.clear()
                 my_form.fill()
+                self.switch_to_current_win_handle(browser, current_win_handle, current_url)
+                if current_url != browser.current_url:
+                    continue
                 self._do_click(browser, current_win_handle, f_click_ele)
-                self.close_some_page(browser, current_handles, current_win_handle)
+                self.close_some_page(browser, current_handles, current_win_handle, current_url)
 
     def click_other_elements(self, browser, click_elements):
         '''
         直接点击元素
         '''
         current_win_handle = browser.current_window_handle
+        current_url = browser.current_url
         current_handles = browser.window_handles
         for click_ele in click_elements:
+            self.switch_to_current_win_handle(browser, current_win_handle, current_url)
+            if current_url != browser.current_url:
+                continue
             self._do_click(browser, current_win_handle, click_ele)
-            self.close_some_page(browser, current_handles, current_win_handle)
+            self.close_some_page(browser, current_handles, current_win_handle, current_url)
 
-    def switch_to_current_win_handle(self, browser, current_win_handle):
+    def switch_to_current_win_handle(self, browser, current_win_handle, current_url):
         browser.switch_to.window(current_win_handle)
-        current_url = browser.current_url
-        WebDriverWait(browser.driver, 5, 0.5).until(EC.url_to_be(current_url))
+        WebDriverWait(browser.driver, 2, 0.5).until(EC.url_to_be(current_url))
 
     def _do_click(self, browser, current_win_handle, click_element):
         '''
         执行点击操作，会出现以下情况：
             1.出现模态框/通知/确认
         '''
-        self.switch_to_current_win_handle(browser, current_win_handle)
-        current_url = browser.current_url
         ac_chs = ActionChains(browser.driver)
         try:
             # ac_chs.move_to_element(click_element).key_down(
@@ -754,7 +801,7 @@ class Crawler(object):
         except Exception as e:
             pass
 
-    def close_some_page(self, browser, current_handles, current_win_handle):
+    def close_some_page(self, browser, current_handles, current_win_handle, current_url):
         # 检测是否打开了新页面，如果打开了新页面，需要等待新页面url重现，然后关闭新页面. 新页面url不在此次获取, 在后续的http请求日志中获取，
         # 如果没有新页打开，结束操作
         opened_new = EC.new_window_is_opened(current_handles)(browser.driver)
@@ -765,7 +812,7 @@ class Crawler(object):
             # 需要等待一定时间，保障点击后新页面打开
             try:
                 browser.switch_to.window(win_handle)
-                wait = WebDriverWait(browser.driver, 1.5)
+                wait = WebDriverWait(browser.driver, 1.5, 0.5)
                 # wait.until(EC.new_window_is_opened(current_handles))
                 wait.until_not(EC.url_contains('about:blank'))
                 # wait.until(EC.title_is)
@@ -778,7 +825,7 @@ class Crawler(object):
                 browser.close()
             finally:
                 # 只要切换过页面，一定要回到当前页面
-                self.switch_to_current_win_handle(browser, current_win_handle)
+                self.switch_to_current_win_handle(browser, current_win_handle, current_url)
 
     def add_allow_domain(self, url, allowed_subdomain=False):
         '''
@@ -810,33 +857,33 @@ class Crawler(object):
         logs = browser.get_http_logs()
         # 获取动态url
         dynamic_urls = []
-        entries = []
         for entry in logs:
             host = entry.host
             path = entry.path
             if host in self.allow_domains and not self.url_endswith_ignore(path):
-                entries.append(entry)
-        for url in entries:
-            url_data = {}
-            _url = url.url
-            method = url.method
-            url_data['referer'] = url.headers.get('Referer', '')
-            if method == 'GET':
-                params = url.querystring
-                if params:
-                    _url = self.remove_query_from_url(_url)
-            elif method == 'POST':
-                params = url.params
-                _url_parse = self.parse_url(_url)
-                if _url_parse.query:
-                    self.add_query_to_params(_url_parse, params)
-                    _url = self.remove_query_from_url(_url)
-                params = self.trans_post_url_params(params)
-            url_data['domain_id'] = self.domain_id
-            url_data['url'] = _url
-            url_data['method'] = method
-            url_data['params'] = params
-            dynamic_urls.append(url_data)
+                url = entry
+                url_data = {}
+                _url = url.url
+                if 'logout' in _url:
+                    continue
+                method = url.method
+                url_data['referer'] = url.headers.get('Referer', '')
+                if method == 'GET':
+                    params = url.querystring
+                    if params:
+                        _url = self.remove_query_from_url(_url)
+                elif method == 'POST':
+                    params = url.params
+                    _url_parse = self.parse_url(_url)
+                    if _url_parse.query:
+                        self.add_query_to_params(_url_parse, params)
+                        _url = self.remove_query_from_url(_url)
+                    params = self.trans_post_url_params(params)
+                url_data['domain_id'] = self.domain_id
+                url_data['url'] = _url
+                url_data['method'] = method
+                url_data['params'] = params
+                dynamic_urls.append(url_data)
         return dynamic_urls
     
     def handle_next_urls(self, urls, url_type):
@@ -850,18 +897,22 @@ class Crawler(object):
         urls: 字典列表
         
         '''
-        next_urls = set()
         url_datas = []
         for url_data in urls:
             method = url_data.get('method')
             if method == 'GET':
                 _url = url_data.get('url')
+                _params = url_data.get('params', '')
+                if _params:
+                    _url = '?'.join([_url, _params])
                 if _url:
-                    next_urls.add(_url)
+                    with self._next_urls_lock:
+                        next_urls = self.next_urls
+                        if _url not in next_urls:
+                            next_urls.add(_url)
+                            # print('put next_url into crawling_url_queue: ', _url)
+                            self.crawling_url_queue.put(_url)
             self.collect_save_url_data(url_datas, url_data)
-        for next_url in next_urls:
-            print('next_url: ', next_url)
-            self.crawling_url_queue.put(next_url)
         # 保存url数据
         if url_datas:
             self.save_urls(url_datas)
@@ -879,12 +930,12 @@ class Crawler(object):
             return params
         parts = query.split('&')
         parts = [part.split('=') for part in parts] 
-        parts = [(p, v) for part in parts if len(part) == 2]
+        parts = [(part[0], part[1]) for part in parts if len(part) == 2]
         for p, v in parts:
-            p = p.strip()
-            v = v.strip()
-            if p and v:
-                params[p] = v
+            _p = p.strip()
+            _v = v.strip()
+            if _p and _v:
+                params[_p] = _v
         return params
 
     def remove_query_from_url(self, url):
@@ -902,11 +953,15 @@ class Crawler(object):
         params_list = []
         for name, value in params.items():
             params_list.append({"name": name, "value": value, "type": "multible"})
+        if not params_list:
+            return ''
         return json.dumps(params_list)
 
     def get_params_fields(self, url_data):
         method = url_data.get('method')
         params = url_data.get('params')
+        if not params:
+            return []
         if method == 'GET':
             params = self.query2params(params)
             params_fields = list(params.keys())
@@ -917,7 +972,7 @@ class Crawler(object):
             return []
         params_fields.sort()
         return params_fields
-        
+
     def collect_save_url_data(self, url_datas, url_data):
         ''' 
         保存链接数据
@@ -925,12 +980,17 @@ class Crawler(object):
         '''
         url = url_data['url']
         method = url_data['method']
-        params_fields = self.get_params_fields(url_data)
-        url_data_string = '_'.join([url, "_".join(params_fields), method])
+        params = url_data['params']
+        if method == 'GET':
+            url_data_string = '_'.join([url, params, method])
+        else:
+            params_fields = self.get_params_fields(url_data)
+            url_data_string = '_'.join([url, "_".join(params_fields), method])
         url_md5_digest = hashlib.md5(url_data_string.encode('utf-8')).hexdigest()
-        if url_md5_digest not in self.saved_url_hashes:
-           url_datas.append(url_data) 
-           self.saved_url_hashes.add(url_md5_digest)
+        with self._saved_url_lock:
+            if url_md5_digest not in self.saved_url_hashes:
+                url_datas.append(url_data) 
+                self.saved_url_hashes.add(url_md5_digest)
 
     def save_urls(self, url_datas):
         '''
@@ -964,12 +1024,19 @@ class Crawler(object):
         flag = False
         href_val = click_element.get_attribute('href')
         text_val = click_element.get_attribute('text')
-        if href_val and re.search('logout', href_val.lower()):
+        value_val = click_element.get_attribute('value')
+        logout_pattern = u'logout|close|reset|关闭|退出|关闭系统|退出系统'
+        if href_val and re.search(logout_pattern, href_val.lower()):
             flag = True
             return flag
         if text_val and re.search(
-                u'logout|close|关闭|退出|关闭系统|退出系统', text_val.lower()):
+                logout_pattern, text_val.lower()):
             flag = True
+            return flag
+        if value_val and re.search(
+                logout_pattern, value_val.lower()):
+            flag = True
+            return flag
         return flag  
 
     def filter_logout_element(self, elements):
