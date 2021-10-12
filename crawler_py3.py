@@ -43,6 +43,9 @@ class ChromeBrowser(object):
         options.add_argument('--ignore-urlfetcher-cert-requests')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-gpu')
+        options.add_argument('--process-per-site')
+        options.add_argument('--disable-images')
+        options.add_argument('--single-process')
         # 文件下载放到临时目录
         profile = {"download.default_directory": "/tmp", "download.prompt_for_download": False}
         options.add_experimental_option("prefs", profile)
@@ -823,9 +826,8 @@ class Crawler(object):
                 # new_url = browser.current_url
                 # print('go to close new_url', new_url)
                 browser.close()
-            finally:
-                # 只要切换过页面，一定要回到当前页面
-                self.switch_to_current_win_handle(browser, current_win_handle, current_url)
+        # 只要切换过页面，一定要回到当前页面
+        # self.switch_to_current_win_handle(browser, current_win_handle, current_url)
 
     def add_allow_domain(self, url, allowed_subdomain=False):
         '''
