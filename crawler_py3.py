@@ -21,6 +21,8 @@ import hashlib
 import json
 import threading
 import pymysql, pymysql.cursors
+import atexit
+import signal
 
 
 CHROME_DRIVER_PATH = '/home/uos/chromedriver'
@@ -476,10 +478,14 @@ class Crawler(object):
         self.log_entry_queue = Queue()
         self.crawl_thread_num = self.task['thread'] if self.task['thread'] > crawl_thread_num else crawl_thread_num
         self.max_url_count = self.task['max_url_count']
+        self._url_count = 0
         self.max_running_time = max_running_time
         self.allow_domains = set()
         self._saved_url_lock = threading.Lock()
         self.saved_url_hashes = set()
+        for sig in [signal.SIGINT, signal.SIGHUP, signal.SIGTERM]:
+            signal.signal(sig, self.sig_clean)
+        atexit.register(self.clean)
 
     def _start_urls(self):
         """Get the start urls of spider"""
@@ -555,7 +561,106 @@ class Crawler(object):
             cookie_dicts = [{'name': name.strip(), 'value': value.strip()} for (name, value) in cookie_parts if name.strip() and value.strip()]
             for cookie_dict in cookie_dicts:
                 browser.add_cookie(cookie_dict)
-    
+
+    def switch_to_first_win_handle(self, browser):
+        window_handles = browser.window_handles
+        for win_handle in window_handles[1:]:
+            browser.switch_to.window(win_handle)
+            browser.close()
+        first_window_handle = window_handles[0]
+        browser.switch_to.window(first_window_handle) 
+
+    def start2(self, allowed_subdomain=False, debug=False):
+        if not self.task['spider_enable']:
+            return
+        start_urls = self.start_urls
+        if debug:
+            self.crawl_thread_num = 1
+        for s_url in start_urls:
+            self.add_allow_domain(s_url, allowed_subdomain)
+            self.pending_complete_urls.add(s_url)
+            self.crawling_url_queue.put(s_url)
+        self.threads = []
+        self.browsers = []
+        for _ in range(self.crawl_thread_num):
+            browser = ChromeBrowser()
+            _t = threading.Thread(target=self.crawl2, args=(browser,))
+            _t.setDaemon(True)
+            self.threads.append(_t)
+            self.browsers.append(browser)
+        for _t in self.threads:
+            _t.start()
+        start_time = time.time()
+        end_time = self.max_running_time + start_time
+        while True:
+            if time.time() > end_time:
+                break
+            time.sleep(5)
+        print('to be shutdown ...')
+        for _t in self.threads:
+            _t.join(10)
+
+    def sig_clean(self, signalnum, frame):
+        self.clean()
+
+    def clean(self):
+        # 主线程结束前的收尾工作
+        for _b in self.browsers:
+            _b.quit()
+        # 关闭数据库连接
+        try:
+            self.db.close()
+        except:
+            pass
+
+        print('crawler finished at ', time.ctime())
+
+    def crawl2(self, browser):
+        start_time = time.time()
+        print('start_time: ', time.ctime(start_time))
+        self.switch_to_first_win_handle(browser)
+        while True:
+            if (time.time() - start_time) > self.max_running_time:
+                break
+            if self._url_count >= self.max_url_count:
+                break
+            try:
+                url = self.crawling_url_queue.get(timeout=2)
+            except Empty:
+                # TODO：制定一个sleep检查机制，满足某个条件后，提前结束爬虫
+                time.sleep(.5)
+                continue
+            try:
+                # 设置抓取的日志的url范围
+                self.add_driver_scopes(browser)
+                browser.add_request_interceptor(self.interceptor)
+                browser.set_page_load_timeout(60)
+                print('crawl', url)
+                # 由于设置cookie前必须访问一下页面
+                # 故需要设置完cookie后再访问页面
+                cookies = self.cookies
+                if cookies:
+                    browser.get(url)
+                    self.add_cookies(browser)
+                    browser.get(url)
+                else:
+                    browser.get(url)
+                wait = WebDriverWait(browser.driver, 5, 0.5)
+                wait.until(EC.title_is)
+                static_urls = self.get_static_urls(browser, url)
+                with self._pending_complete_urls_lock:
+                    self.handle_next_urls(static_urls, 'static')
+                dynamic_urls = self.get_dynamic_urls(browser)
+                browser.delete_all_cookies()
+                with self._pending_complete_urls_lock:
+                    self.handle_next_urls(dynamic_urls, 'dynamic')
+                    self._url_count += 1
+            except Exception as e:
+                print('crawl error: ', url, e)
+            finally:
+                print('crawl url finished', url)
+                self.crawling_url_queue.task_done()
+
     def start(self, allowed_subdomain=False, debug=False):
         if not self.task['spider_enable']:
             return
@@ -602,7 +707,6 @@ class Crawler(object):
         self.db.close()
         print('crawler finished at ', time.ctime())
 
-
     def crawl(self, url):
         try:
             browser = ChromeBrowser()
@@ -634,7 +738,6 @@ class Crawler(object):
                     self.complete_urls)
         except Exception as e:
             print('crawl error: ', url, e)
-            raise e
         finally:
             browser.delete_all_cookies()
             browser.quit()
@@ -766,7 +869,7 @@ class Crawler(object):
             for f_click_ele in form_click_elements:
                 my_form.clear()
                 my_form.fill()
-                self.switch_to_current_win_handle(browser, current_win_handle, current_url)
+                self.switch_to_current_win_handle(browser, current_win_handle)
                 if current_url != browser.current_url:
                     continue
                 self._do_click(browser, current_win_handle, f_click_ele)
@@ -780,15 +883,14 @@ class Crawler(object):
         current_url = browser.current_url
         current_handles = browser.window_handles
         for click_ele in click_elements:
-            self.switch_to_current_win_handle(browser, current_win_handle, current_url)
+            self.switch_to_current_win_handle(browser, current_win_handle)
             if current_url != browser.current_url:
                 continue
             self._do_click(browser, current_win_handle, click_ele)
             self.close_some_page(browser, current_handles, current_win_handle, current_url)
 
-    def switch_to_current_win_handle(self, browser, current_win_handle, current_url):
+    def switch_to_current_win_handle(self, browser, current_win_handle):
         browser.switch_to.window(current_win_handle)
-        WebDriverWait(browser.driver, 2, 0.5).until(EC.url_to_be(current_url))
 
     def _do_click(self, browser, current_win_handle, click_element):
         '''
@@ -820,12 +922,11 @@ class Crawler(object):
                 wait.until_not(EC.url_contains('about:blank'))
                 # wait.until(EC.title_is)
                 # wait.until(url_not_contains('about:blank'))
+                browser.close()
             except TimeoutException as e:
                 pass
-            else:
-                # new_url = browser.current_url
-                # print('go to close new_url', new_url)
-                browser.close()
+            except Exception as e:
+                pass
         # 只要切换过页面，一定要回到当前页面
         # self.switch_to_current_win_handle(browser, current_win_handle, current_url)
 
@@ -908,12 +1009,9 @@ class Crawler(object):
                 if _params:
                     _url = '?'.join([_url, _params])
                 if _url:
-                    with self._next_urls_lock:
-                        next_urls = self.next_urls
-                        if _url not in next_urls:
-                            next_urls.add(_url)
-                            # print('put next_url into crawling_url_queue: ', _url)
-                            self.crawling_url_queue.put(_url)
+                    if _url not in self.pending_complete_urls:
+                        self.pending_complete_urls.add(_url)
+                        self.crawling_url_queue.put(_url)
             self.collect_save_url_data(url_datas, url_data)
         # 保存url数据
         if url_datas:
@@ -1062,7 +1160,7 @@ def main(task_id, domain_id, debug):
     crawler.delete_data()
     # start_urls = ['https://www.baidu.com']
     # start_urls = ['http://172.16.110.232/DVWA/login.php']
-    crawler.start(debug=debug)
+    crawler.start2(debug=debug)
     
 
 
