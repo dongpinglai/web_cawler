@@ -23,6 +23,8 @@ import threading
 import pymysql, pymysql.cursors
 import atexit
 import signal
+import sys
+import logging
 
 
 CHROME_DRIVER_PATH = '/home/uos/chromedriver'
@@ -65,6 +67,9 @@ class ChromeBrowser(object):
     def get_http_logs(self):
         logs = self.driver.requests
         return logs
+
+    def set_requests_empty(self):
+        self.driver.requests.clear() 
 
     def add_request_interceptor(self, request_interceptor):
         self.driver.request_interceptor = request_interceptor
@@ -461,7 +466,7 @@ class Crawler(object):
     动态、静态结合查找url
     '''
     def __init__(self, task_id, domain_id, crawl_thread_num=5,
-                 max_running_time=60 * 30):
+                 max_running_time=30):
         self.task_id = task_id
         self.domain_id = domain_id
         self.db = DbManage()
@@ -479,7 +484,8 @@ class Crawler(object):
         self.crawl_thread_num = self.task['thread'] if self.task['thread'] > crawl_thread_num else crawl_thread_num
         self.max_url_count = self.task['max_url_count']
         self._url_count = 0
-        self.max_running_time = max_running_time
+        max_running_time = self.task['timeout'] if self.task['timeout'] else max_running_time
+        self.max_running_time = max_running_time * 60
         self.allow_domains = set()
         self._saved_url_lock = threading.Lock()
         self.saved_url_hashes = set()
@@ -598,27 +604,29 @@ class Crawler(object):
             time.sleep(5)
         print('to be shutdown ...')
         for _t in self.threads:
-            _t.join(10)
+            if _t.is_alive():
+                _t.join(1)
+        print('start_time', time.ctime(start_time))
 
     def sig_clean(self, signalnum, frame):
         self.clean()
 
     def clean(self):
         # 主线程结束前的收尾工作
-        for _b in self.browsers:
-            _b.quit()
-        # 关闭数据库连接
         try:
+            for _b in self.browsers:
+                _b.quit()
+            # 关闭数据库连接
             self.db.close()
         except:
             pass
-
-        print('crawler finished at ', time.ctime())
+        finally:
+            print('crawler finished at ', time.ctime())
+            sys.exit(0)
 
     def crawl2(self, browser):
         start_time = time.time()
         print('start_time: ', time.ctime(start_time))
-        self.switch_to_first_win_handle(browser)
         while True:
             if (time.time() - start_time) > self.max_running_time:
                 break
@@ -631,6 +639,8 @@ class Crawler(object):
                 time.sleep(.5)
                 continue
             try:
+                self.switch_to_first_win_handle(browser)
+                browser.set_requests_empty()
                 # 设置抓取的日志的url范围
                 self.add_driver_scopes(browser)
                 browser.add_request_interceptor(self.interceptor)
@@ -650,7 +660,7 @@ class Crawler(object):
                 static_urls = self.get_static_urls(browser, url)
                 with self._pending_complete_urls_lock:
                     self.handle_next_urls(static_urls, 'static')
-                dynamic_urls = self.get_dynamic_urls(browser)
+                dynamic_urls = self.get_dynamic_urls(browser, url)
                 browser.delete_all_cookies()
                 with self._pending_complete_urls_lock:
                     self.handle_next_urls(dynamic_urls, 'dynamic')
@@ -727,7 +737,7 @@ class Crawler(object):
             wait.until(EC.title_is)
             static_urls = self.get_static_urls(browser, url)
             self.handle_next_urls(static_urls, 'static')
-            dynamic_urls = self.get_dynamic_urls(browser)
+            dynamic_urls = self.get_dynamic_urls(browser, url)
             self.handle_next_urls(dynamic_urls, 'dynamic')
             # 当前url已经爬取完成,
             # 是否需要加锁？？
@@ -781,7 +791,7 @@ class Crawler(object):
         return static_url_datas
 
     # @try_times(3)
-    def get_dynamic_urls(self, browser):
+    def get_dynamic_urls(self, browser, url):
         '''
         动态urls: 需要进行某些操作（比如点击），需要通过http请求报文获取
         从浏览器的请求日志中获取urls，比如：
@@ -789,20 +799,26 @@ class Crawler(object):
             form表单提交之后的刷新问题处理：优先处理其他直接点击的元素，如果有多个form表单的情况下需要重新获取form然后处理
             2.其他的可以直接点击操作的元素产生的url
         '''
-        all_click_elements = self.find_all_click_elements(browser)
-        forms = self.find_form_elements(browser)
-        all_form_click_elements = []
-        form_and_form_clicks = []
-        for form in forms:
-            form_click_elements = self.find_form_click_elements(form)
-            all_form_click_elements.extend(form_click_elements)
-            form_and_form_clicks.append((form, form_click_elements))
-        not_form_click_elements = self.find_not_form_click_elements(all_click_elements, all_form_click_elements)
-        # 完成点击操作，以便记录http请求日志
-        self.click_other_elements(browser, not_form_click_elements)
-        # 操作form表单
-        for form, form_click_elements in form_and_form_clicks:
-            self.click_form_submit(browser, form, form_click_elements)
+        try:
+            current_win_handle = browser.current_window_handle
+            current_url = browser.current_url
+            current_handles = browser.window_handles
+            all_click_elements = self.find_all_click_elements(browser)
+            forms = self.find_form_elements(browser)
+            all_form_click_elements = []
+            form_and_form_clicks = []
+            for form in forms:
+                form_click_elements = self.find_form_click_elements(form)
+                all_form_click_elements.extend(form_click_elements)
+                form_and_form_clicks.append((form, form_click_elements))
+            not_form_click_elements = self.find_not_form_click_elements(all_click_elements, all_form_click_elements)
+            # 完成点击操作，以便记录http请求日志
+            self.click_other_elements(browser, current_win_handle, current_url, current_handles,not_form_click_elements)
+            # 操作form表单
+            for form, form_click_elements in form_and_form_clicks:
+                self.click_form_submit(browser, current_win_handle, current_url, current_handles,form, form_click_elements)
+        except Exception as e:
+            logging.exception('get_dynamic_urls on "%s"click action error: %s', url, e)
         # 处理http请求日志
         dynamic_urls = self.process_log_entry(browser)
         return dynamic_urls
@@ -856,15 +872,12 @@ class Crawler(object):
     def to_absolute_url(self, url, current_url):
         return urljoin(current_url, url)
 
-    def click_form_submit(self, browser, form, form_click_elements):
+    def click_form_submit(self, browser, current_win_handle, current_url, current_handles,form, form_click_elements):
         '''
         填充表单后，点击元素
         '''
         my_form = Form(form)
         iterate_count = my_form._iterate_count
-        current_win_handle = browser.current_window_handle
-        current_url = browser.current_url
-        current_handles = browser.window_handles
         for _ in range(iterate_count):
             for f_click_ele in form_click_elements:
                 my_form.clear()
@@ -875,13 +888,10 @@ class Crawler(object):
                 self._do_click(browser, current_win_handle, f_click_ele)
                 self.close_some_page(browser, current_handles, current_win_handle, current_url)
 
-    def click_other_elements(self, browser, click_elements):
+    def click_other_elements(self, browser, current_win_handle, current_url, current_handles,click_elements):
         '''
         直接点击元素
         '''
-        current_win_handle = browser.current_window_handle
-        current_url = browser.current_url
-        current_handles = browser.window_handles
         for click_ele in click_elements:
             self.switch_to_current_win_handle(browser, current_win_handle)
             if current_url != browser.current_url:
