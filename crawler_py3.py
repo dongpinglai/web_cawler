@@ -399,7 +399,7 @@ class DbManage(object):
             cursor.execute(sql, args)
         except Exception as e:
             connection.rollback()
-            print('mysql execute (%s, %s) error: %s' % (sql, args, e))
+            logging.error('mysql execute (%s, %s) error: %s' % (sql, args, e))
         else:
             connection.commit()
             return cursor
@@ -411,7 +411,7 @@ class DbManage(object):
             cursor.executemany(sql, args)
         except Exception as e:
             connection.rollback()
-            print('mysql executemany (%s, %s)error: %s' % (sql, args, e))
+            logging.error('mysql executemany (%s, %s)error: %s' % (sql, args, e))
         else:
             connection.commit()
             return cursor
@@ -491,7 +491,6 @@ class Crawler(object):
         self.saved_url_hashes = set()
         for sig in [signal.SIGINT, signal.SIGHUP, signal.SIGTERM]:
             signal.signal(sig, self.sig_clean)
-        atexit.register(self.clean)
 
     def _start_urls(self):
         """Get the start urls of spider"""
@@ -601,12 +600,10 @@ class Crawler(object):
         while True:
             if time.time() > end_time:
                 break
-            time.sleep(5)
-        print('to be shutdown ...')
-        for _t in self.threads:
-            if _t.is_alive():
-                _t.join(1)
-        print('start_time', time.ctime(start_time))
+            time.sleep(.5)
+        logging.info('start_time at: %s', time.ctime(start_time))
+        logging.info('to be shutdown ...')
+        self.clean()
 
     def sig_clean(self, signalnum, frame):
         self.clean()
@@ -618,15 +615,14 @@ class Crawler(object):
                 _b.quit()
             # 关闭数据库连接
             self.db.close()
-        except:
-            pass
+        except Exception as e:
+            logging.error('clean error: %s', e)
         finally:
-            print('crawler finished at ', time.ctime())
-            sys.exit(0)
+            logging.info('crawler finished at: %s ', time.ctime())
 
     def crawl2(self, browser):
         start_time = time.time()
-        print('start_time: ', time.ctime(start_time))
+        logging.info('start_time: %s', time.ctime(start_time))
         while True:
             if (time.time() - start_time) > self.max_running_time:
                 break
@@ -645,7 +641,8 @@ class Crawler(object):
                 self.add_driver_scopes(browser)
                 browser.add_request_interceptor(self.interceptor)
                 browser.set_page_load_timeout(60)
-                print('crawl', url)
+                browser.set_script_timeout(60)
+                logging.info('crawl %s', url)
                 # 由于设置cookie前必须访问一下页面
                 # 故需要设置完cookie后再访问页面
                 cookies = self.cookies
@@ -666,10 +663,10 @@ class Crawler(object):
                     self.handle_next_urls(dynamic_urls, 'dynamic')
                     self._url_count += 1
             except Exception as e:
-                print('crawl error: ', url, e)
+                logging.exception('crawl %s error: %s', url, e)
             finally:
-                print('crawl url finished', url)
-                self.crawling_url_queue.task_done()
+                logging.info('crawl %s finished', url)
+                # self.crawling_url_queue.task_done()
 
     def start(self, allowed_subdomain=False, debug=False):
         if not self.task['spider_enable']:
@@ -901,6 +898,7 @@ class Crawler(object):
 
     def switch_to_current_win_handle(self, browser, current_win_handle):
         browser.switch_to.window(current_win_handle)
+        time.sleep(1)
 
     def _do_click(self, browser, current_win_handle, click_element):
         '''
@@ -1025,6 +1023,7 @@ class Crawler(object):
             self.collect_save_url_data(url_datas, url_data)
         # 保存url数据
         if url_datas:
+            logging.info('save urls:%s, %s', url_type, len(url_datas))
             self.save_urls(url_datas)
             
     def add_query_to_params(self, url, params):
@@ -1107,7 +1106,6 @@ class Crawler(object):
         批量保存url数据
         '''
         count = len(url_datas)
-        print('save_url', count)
         step = 100
         for start_idx in range(0, count, step):
             stop_idx = start_idx + step
