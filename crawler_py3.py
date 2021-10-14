@@ -27,6 +27,8 @@ import sys
 import logging
 
 
+logging.basicConfig(filename='crawler.log', level=logging.INFO, format='%(name)s-%(created)s-%(thread)s: %(message)s')
+
 CHROME_DRIVER_PATH = '/home/uos/chromedriver'
 
 
