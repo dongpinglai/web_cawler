@@ -27,7 +27,7 @@ import sys
 import logging
 
 
-logging.basicConfig(filename='crawler.log', level=logging.INFO, format='%(name)s-%(created)s-%(thread)s: %(message)s')
+logging.basicConfig(filename='crawler.log', level=logging.INFO, format='%(name)s-%(asctime)s-%(threadName)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 CHROME_DRIVER_PATH = '/home/uos/chromedriver'
 
@@ -569,14 +569,6 @@ class Crawler(object):
             for cookie_dict in cookie_dicts:
                 browser.add_cookie(cookie_dict)
 
-    def switch_to_first_win_handle(self, browser):
-        window_handles = browser.window_handles
-        for win_handle in window_handles[1:]:
-            browser.switch_to.window(win_handle)
-            browser.close()
-        first_window_handle = window_handles[0]
-        browser.switch_to.window(first_window_handle) 
-
     def start2(self, allowed_subdomain=False, debug=False):
         if not self.task['spider_enable']:
             return
@@ -625,6 +617,12 @@ class Crawler(object):
     def crawl2(self, browser):
         start_time = time.time()
         logging.info('start_time: %s', time.ctime(start_time))
+        window_handles = browser.window_handles
+        first_window_handle = window_handles[0]
+        self.add_driver_scopes(browser)
+        browser.add_request_interceptor(self.interceptor)
+        browser.set_page_load_timeout(60)
+        browser.set_script_timeout(60)
         while True:
             if (time.time() - start_time) > self.max_running_time:
                 break
@@ -637,13 +635,9 @@ class Crawler(object):
                 time.sleep(.5)
                 continue
             try:
-                self.switch_to_first_win_handle(browser)
+                self.switch_to_current_win_handle(browser, first_window_handle)
                 browser.set_requests_empty()
                 # 设置抓取的日志的url范围
-                self.add_driver_scopes(browser)
-                browser.add_request_interceptor(self.interceptor)
-                browser.set_page_load_timeout(60)
-                browser.set_script_timeout(60)
                 logging.info('crawl %s', url)
                 # 由于设置cookie前必须访问一下页面
                 # 故需要设置完cookie后再访问页面
