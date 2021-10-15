@@ -680,8 +680,8 @@ class Crawler(object):
                 logging.info('crawl %s finished', url)
                 # self.crawling_url_queue.task_done()
                 browser.quit()
-            # crawl 结束退出浏览器
-            browser.quit()
+        # crawl 结束退出浏览器
+        browser.quit()
 
     def get_static_urls(self, browser, referer):
         '''
@@ -736,7 +736,7 @@ class Crawler(object):
             form_and_form_clicks = []
             for form in forms:
                 if self._stop_event.is_set():
-                    break
+                    raise Exception('early stop')
                 form_click_elements = self.find_form_click_elements(form)
                 all_form_click_elements.extend(form_click_elements)
                 form_and_form_clicks.append((form, form_click_elements))
@@ -746,7 +746,7 @@ class Crawler(object):
             # 操作form表单
             for form, form_click_elements in form_and_form_clicks:
                 if self._stop_event.is_set():
-                    break
+                    raise Exception('early stop')
                 self.click_form_submit(browser, current_win_handle, current_url, current_handles,form, form_click_elements)
         except Exception as e:
             logging.exception('get_dynamic_urls on "%s"click action error: %s', url, e)
@@ -811,10 +811,10 @@ class Crawler(object):
         iterate_count = my_form._iterate_count
         for _ in range(iterate_count):
             if self._stop_event.is_set():
-                return
+                raise Exception('early stop')
             for f_click_ele in form_click_elements:
                 if self._stop_event.is_set():
-                    return
+                    raise Exception('early stop')
                 my_form.clear()
                 my_form.fill()
                 self.switch_to_current_win_handle(browser, current_win_handle)
@@ -829,7 +829,7 @@ class Crawler(object):
         '''
         for click_ele in click_elements:
             if self._stop_event.is_set():
-                return
+                raise Exception('early stop')
             self.switch_to_current_win_handle(browser, current_win_handle)
             if current_url != browser.current_url:
                 continue
@@ -864,7 +864,7 @@ class Crawler(object):
         for win_handle in window_handles[1:]:
             # 需要等待一定时间，保障点击后新页面打开
             if self._stop_event.is_set():
-                return
+                raise Exception('early stop')
             try:
                 browser.switch_to.window(win_handle)
                 wait = WebDriverWait(browser.driver, 1.5, 0.5)
@@ -912,7 +912,7 @@ class Crawler(object):
         dynamic_urls = []
         for entry in logs:
             if self._stop_event.is_set():
-                break
+                raise Exception('early stop')
             host = entry.host
             path = entry.path
             if host in self.allow_domains and not self.url_endswith_ignore(path):
@@ -955,7 +955,7 @@ class Crawler(object):
         url_datas = []
         for url_data in urls:
             if self._stop_event.is_set():
-                return 
+                raise Exception('early stop')
             method = url_data.get('method')
             if method == 'GET':
                 _url = url_data.get('url')
@@ -1055,7 +1055,7 @@ class Crawler(object):
         step = 100
         for start_idx in range(0, count, step):
             if self._stop_event.is_set():
-                return
+                raise Exception('early stop')
             stop_idx = start_idx + step
             _datas = url_datas[start_idx: stop_idx]
             args = []
