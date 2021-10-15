@@ -583,13 +583,14 @@ class Crawler(object):
             self.pending_complete_urls.add(s_url)
             self.crawling_url_queue.put(s_url)
         self.threads = []
-        self.browsers = []
+        # self.browsers = []
         for _ in range(self.crawl_thread_num):
-            browser = ChromeBrowser()
-            _t = threading.Thread(target=self.crawl2, args=(browser,))
-            _t.setDaemon(True)
+            # browser = ChromeBrowser()
+            # _t = threading.Thread(target=self.crawl2, args=(browser,))
+            _t = threading.Thread(target=self.crawl2) 
+            # _t.setDaemon(True)
             self.threads.append(_t)
-            self.browsers.append(browser)
+            # self.browsers.append(browser)
         for _t in self.threads:
             _t.start()
         start_time = time.time()
@@ -598,7 +599,7 @@ class Crawler(object):
         while self.__is_running:
             if time.time() > end_time:
                 self.stop()
-            time.sleep(5)
+            time.sleep(2)
         logging.info('start_time at: %s', time.ctime(start_time))
         logging.info('to be shutdown ...')
         self.clean()
@@ -614,8 +615,8 @@ class Crawler(object):
     def clean(self):
         # 主线程结束前的收尾工作
         try:
-            for _b in self.browsers:
-                _b.quit()
+            # for _b in self.browsers:
+            #     _b.quit()
             # 关闭数据库连接
             self.db.close()
         except Exception as e:
@@ -623,21 +624,19 @@ class Crawler(object):
         finally:
             logging.info('crawler finished at: %s ', time.ctime())
 
-    def crawl2(self, browser):
+    def crawl2(self):
         start_time = time.time()
         logging.info('start_time: %s', time.ctime(start_time))
-        window_handles = browser.window_handles
-        first_window_handle = window_handles[0]
-        self.add_driver_scopes(browser)
-        browser.add_request_interceptor(self.interceptor)
-        browser.set_page_load_timeout(60)
-        browser.set_script_timeout(60)
         while True:
+            browser = ChromeBrowser()
             if self._stop_event.is_set():
+                logging.info('stop event is setted')
                 break
             if (time.time() - start_time) > self.max_running_time:
+                logging.info('crawl time out')
                 break
             if self._url_count >= self.max_url_count:
+                logging.info('crawl max url count')
                 break
             try:
                 url = self.crawling_url_queue.get(timeout=2)
@@ -646,8 +645,14 @@ class Crawler(object):
                 time.sleep(.5)
                 continue
             try:
+                window_handles = browser.window_handles
+                first_window_handle = window_handles[0]
                 self.switch_to_current_win_handle(browser, first_window_handle)
-                browser.set_requests_empty()
+                self.add_driver_scopes(browser)
+                browser.add_request_interceptor(self.interceptor)
+                browser.set_page_load_timeout(60)
+                browser.set_script_timeout(60)
+                browser.delete_all_cookies()
                 # 设置抓取的日志的url范围
                 logging.info('crawl %s', url)
                 # 由于设置cookie前必须访问一下页面
@@ -665,7 +670,7 @@ class Crawler(object):
                 with self._pending_complete_urls_lock:
                     self.handle_next_urls(static_urls, 'static')
                 dynamic_urls = self.get_dynamic_urls(browser, url)
-                browser.delete_all_cookies()
+                browser.set_requests_empty()
                 with self._pending_complete_urls_lock:
                     self.handle_next_urls(dynamic_urls, 'dynamic')
                     self._url_count += 1
@@ -674,6 +679,9 @@ class Crawler(object):
             finally:
                 logging.info('crawl %s finished', url)
                 # self.crawling_url_queue.task_done()
+                browser.quit()
+            # crawl 结束退出浏览器
+            browser.quit()
 
     def get_static_urls(self, browser, referer):
         '''
@@ -727,6 +735,8 @@ class Crawler(object):
             all_form_click_elements = []
             form_and_form_clicks = []
             for form in forms:
+                if self._stop_event.is_set():
+                    return
                 form_click_elements = self.find_form_click_elements(form)
                 all_form_click_elements.extend(form_click_elements)
                 form_and_form_clicks.append((form, form_click_elements))
@@ -798,7 +808,11 @@ class Crawler(object):
         my_form = Form(form)
         iterate_count = my_form._iterate_count
         for _ in range(iterate_count):
+            if self._stop_event.is_set():
+                return
             for f_click_ele in form_click_elements:
+                if self._stop_event.is_set():
+                    return
                 my_form.clear()
                 my_form.fill()
                 self.switch_to_current_win_handle(browser, current_win_handle)
@@ -812,6 +826,8 @@ class Crawler(object):
         直接点击元素
         '''
         for click_ele in click_elements:
+            if self._stop_event.is_set():
+                return
             self.switch_to_current_win_handle(browser, current_win_handle)
             if current_url != browser.current_url:
                 continue
@@ -845,6 +861,8 @@ class Crawler(object):
         window_handles = browser.window_handles
         for win_handle in window_handles[1:]:
             # 需要等待一定时间，保障点击后新页面打开
+            if self._stop_event.is_set():
+                return
             try:
                 browser.switch_to.window(win_handle)
                 wait = WebDriverWait(browser.driver, 1.5, 0.5)
