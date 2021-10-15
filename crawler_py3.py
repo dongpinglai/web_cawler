@@ -490,6 +490,8 @@ class Crawler(object):
         self.max_running_time = max_running_time * 60
         self.allow_domains = set()
         self._saved_url_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self.__is_running = False
         self.saved_url_hashes = set()
         for sig in [signal.SIGINT, signal.SIGHUP, signal.SIGTERM]:
             signal.signal(sig, self.sig_clean)
@@ -591,16 +593,24 @@ class Crawler(object):
             _t.start()
         start_time = time.time()
         end_time = self.max_running_time + start_time
+        self.__is_running = True
         while True:
+            if not self.__is_running:
+                break
             if time.time() > end_time:
                 break
             time.sleep(.5)
         logging.info('start_time at: %s', time.ctime(start_time))
         logging.info('to be shutdown ...')
+        self._stop_event.set()
         self.clean()
+        sys.exit()
+
+    def stop(self):
+        self.__is_running = False
 
     def sig_clean(self, signalnum, frame):
-        self.clean()
+        self.stop()
 
     def clean(self):
         # 主线程结束前的收尾工作
@@ -624,6 +634,8 @@ class Crawler(object):
         browser.set_page_load_timeout(60)
         browser.set_script_timeout(60)
         while True:
+            if self._stop_event.is_set():
+                break
             if (time.time() - start_time) > self.max_running_time:
                 break
             if self._url_count >= self.max_url_count:
@@ -664,90 +676,6 @@ class Crawler(object):
                 logging.info('crawl %s finished', url)
                 # self.crawling_url_queue.task_done()
 
-    def start(self, allowed_subdomain=False, debug=False):
-        if not self.task['spider_enable']:
-            return
-        start_urls = self.start_urls
-        if debug:
-            self.crawl_thread_num = 1
-        for s_url in start_urls:
-            self.add_allow_domain(s_url, allowed_subdomain)
-            self.crawling_url_queue.put(s_url)
-        self.crawl_pool = ThreadPoolExecutor(self.crawl_thread_num)
-        start_time = time.time()
-        print('start_time: ', time.ctime(start_time))
-        futures = []
-        url_count = 0
-        while True:
-            if (time.time() - start_time) > self.max_running_time:
-                break
-            if url_count >= self.max_url_count:
-                break
-            try:
-                url = self.crawling_url_queue.get(timeout=2)
-            except Empty:
-                # TODO：制定一个sleep检查机制，满足某个条件后，提前结束爬虫
-                time.sleep(.5)
-                continue
-            # 确保已经爬取和正在爬取的url，不会重复提交给爬取线程
-            with self._pending_complete_urls_lock:
-                pending_complete_urls = self.pending_complete_urls
-                if url in pending_complete_urls:
-                    continue
-                self.pending_urls.add(url)
-                # print('submit url: ', url)
-                self.crawl_pool.submit(self.crawl, url)
-                # future = self.crawl_pool.submit(self.crawl, url)
-                # futures.append(future)
-                url_count += 1
-
-        # for fs in as_completed(futures):
-        #     print('future result', fs.result())
-        print("to be shutdown...", time.ctime())
-        self.crawl_pool.shutdown()
-        # 主线程结束前的收尾工作
-        # 关闭数据库连接
-        self.db.close()
-        print('crawler finished at ', time.ctime())
-
-    def crawl(self, url):
-        try:
-            browser = ChromeBrowser()
-            # 设置抓取的日志的url范围
-            self.add_driver_scopes(browser)
-            browser.add_request_interceptor(self.interceptor)
-            print('crawl', url)
-            # 由于设置cookie前必须访问一下页面
-            # 故需要设置完cookie后再访问页面
-            cookies = self.cookies
-            if cookies:
-                browser.get(url)
-                self.add_cookies(browser)
-                browser.get(url)
-            else:
-                browser.get(url)
-            wait = WebDriverWait(browser.driver, 5, 0.5)
-            wait.until(EC.title_is)
-            static_urls = self.get_static_urls(browser, url)
-            self.handle_next_urls(static_urls, 'static')
-            dynamic_urls = self.get_dynamic_urls(browser, url)
-            self.handle_next_urls(dynamic_urls, 'dynamic')
-            # 当前url已经爬取完成,
-            # 是否需要加锁？？
-            with self._pending_complete_urls_lock:
-                self.complete_urls.add(url)
-                self.pending_urls.discard(url)
-                self.pending_complete_urls = self.pending_urls.union(
-                    self.complete_urls)
-        except Exception as e:
-            print('crawl error: ', url, e)
-        finally:
-            browser.delete_all_cookies()
-            browser.quit()
-            print('crawl url finished', url)
-            self.crawling_url_queue.task_done()
-
-    # @try_times(3)
     def get_static_urls(self, browser, referer):
         '''
         静态urls：即在页面完全展示后即可获取
@@ -783,7 +711,6 @@ class Crawler(object):
             static_url_datas.append(url_data)
         return static_url_datas
 
-    # @try_times(3)
     def get_dynamic_urls(self, browser, url):
         '''
         动态urls: 需要进行某些操作（比如点击），需要通过http请求报文获取
