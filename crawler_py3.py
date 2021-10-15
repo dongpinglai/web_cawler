@@ -49,7 +49,8 @@ class ChromeBrowser(object):
         options.add_argument('--ignore-urlfetcher-cert-requests')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-gpu')
-        options.add_argument('--process-per-site')
+        # options.add_argument('--process-per-site')
+        options.add_argument('--single-process')
         options.add_argument('--disable-images')
         options.add_argument('--single-process')
         # 文件下载放到临时目录
@@ -594,20 +595,18 @@ class Crawler(object):
         start_time = time.time()
         end_time = self.max_running_time + start_time
         self.__is_running = True
-        while True:
-            if not self.__is_running:
-                break
+        while self.__is_running:
             if time.time() > end_time:
-                break
-            time.sleep(.5)
+                self.stop()
+            time.sleep(5)
         logging.info('start_time at: %s', time.ctime(start_time))
         logging.info('to be shutdown ...')
-        self._stop_event.set()
         self.clean()
         sys.exit()
 
     def stop(self):
         self.__is_running = False
+        self._stop_event.set()
 
     def sig_clean(self, signalnum, frame):
         self.stop()
@@ -923,7 +922,7 @@ class Crawler(object):
     def handle_next_urls(self, urls, url_type):
         '''
         处理当前页面中获取的对静态和动态链接。
-        一般说，浏览器页面url都是使用get请求，故将get请求的动态url和静态url, 去重后加入到待爬取队列中
+        一般说，浏览器页面url都是使用get请求，故将get请求的动态url和静态url, 去重后加入到待爬取队列中
         这里需要注意：
             1.爬虫需要爬取的url和需要保存到数据库的url数据是有很差异的。
             爬虫要爬取的是页面url，需要保存的url数据包含且不限于页面url，还有页面操作发起的请求url数据
@@ -1086,7 +1085,7 @@ class Crawler(object):
         return list(urls)
 
         
-def main(task_id, domain_id, debug):
+def main(task_id, domain_id, debug=False):
     crawler = Crawler(task_id, domain_id)
     crawler.delete_data()
     # start_urls = ['https://www.baidu.com']
